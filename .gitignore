@@ -1,0 +1,5 @@
+.env
+venv/
+progress.json
+__pycache__/
+TVA A TRANSFERER.xlsx
