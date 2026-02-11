@@ -20,7 +20,7 @@ ACTION_DELAY = float(os.getenv("ACTION_DELAY", "1.0"))
 PAGE_TIMEOUT = int(os.getenv("PAGE_TIMEOUT", "30"))
 
 EXCEL_PATH = os.path.join(os.path.dirname(__file__), "TVA A TRANSFERER.xlsx")
-PROGRESS_FILE = os.path.join(os.path.dirname(__file__), "progress.json")
+PROGRESS_DIR = os.path.dirname(__file__)
 
 SHEETS_TO_PROCESS = ["TVA 3", "TVA 4", "TVA 5 ", "TVA 6 ", "TVA 7", "TVA 8"]
 
@@ -39,24 +39,33 @@ SERVICES = [
 
 # ─── Utilitaires ──────────────────────────────────────────────────────────────
 
-def load_progress():
-    """Charge la progression depuis le fichier JSON."""
-    if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "r") as f:
+def progress_file_for(sheet_name):
+    """Retourne le chemin du fichier de progression pour un onglet."""
+    safe_name = sheet_name.strip().replace(" ", "_")
+    return os.path.join(PROGRESS_DIR, f"progress_{safe_name}.json")
+
+
+def load_progress(sheet_name):
+    """Charge la progression depuis le fichier JSON pour un onglet."""
+    pf = progress_file_for(sheet_name)
+    if os.path.exists(pf):
+        with open(pf, "r") as f:
             return json.load(f)
-    return {"sheet": None, "siren_index": 0}
+    return {"siren_index": 0}
 
 
 def save_progress(sheet_name, siren_index):
-    """Sauvegarde la progression actuelle."""
-    with open(PROGRESS_FILE, "w") as f:
-        json.dump({"sheet": sheet_name, "siren_index": siren_index}, f, indent=2)
+    """Sauvegarde la progression actuelle pour un onglet."""
+    pf = progress_file_for(sheet_name)
+    with open(pf, "w") as f:
+        json.dump({"siren_index": siren_index}, f, indent=2)
 
 
-def clear_progress():
-    """Supprime le fichier de progression."""
-    if os.path.exists(PROGRESS_FILE):
-        os.remove(PROGRESS_FILE)
+def clear_progress(sheet_name):
+    """Supprime le fichier de progression pour un onglet."""
+    pf = progress_file_for(sheet_name)
+    if os.path.exists(pf):
+        os.remove(pf)
 
 
 def extract_abonne_number(cell_value):
@@ -269,7 +278,7 @@ def find_service_link(driver, service_label):
                 # Trouvé ! Cliquer sur le lien "Déléguer ou modifier" de cette ligne
                 link = row.find_element(By.CSS_SELECTOR, "a.formLabel")
                 return link
-    raise Exception(f"Service '{service_label}' non trouve sur la page")
+    return None
 
 
 def select_acteur(driver):
@@ -345,6 +354,10 @@ def process_delegation(driver, abonne, service, is_last=False):
 
     # 1. Cliquer sur "Déléguer ou modifier" pour ce service
     link = find_service_link(driver, service_label)
+    if link is None:
+        print(f"         Service '{service_label}' non disponible, ignore.")
+        return False
+
     link.click()
     time.sleep(ACTION_DELAY * 2)
 
@@ -365,9 +378,11 @@ def process_delegation(driver, abonne, service, is_last=False):
         click_nouvelle_delegation(driver)
         enter_abonne_and_validate(driver, abonne)
 
+    return True
+
 
 def process_siren(driver, siren, abonne):
-    """Traite un SIREN complet (5 délégations)."""
+    """Traite un SIREN complet (délégations disponibles)."""
     print(f"   SIREN {siren}")
 
     # Naviguer vers la page SIREN et entrer le numéro
@@ -377,15 +392,58 @@ def process_siren(driver, siren, abonne):
     # Entrer le numéro d'abonné et valider
     enter_abonne_and_validate(driver, abonne)
 
-    # Effectuer les 5 délégations
-    for i, service in enumerate(SERVICES):
-        is_last = (i == len(SERVICES) - 1)
+    # Détecter les services disponibles sur la page
+    available = []
+    for service in SERVICES:
+        link = find_service_link(driver, service["label"])
+        if link is not None:
+            available.append(service)
+
+    if not available:
+        print(f"   Aucun service disponible pour SIREN {siren}, passage au suivant.")
+        click_nouveau_siren(driver)
+        return
+
+    print(f"   {len(available)}/{len(SERVICES)} services disponibles")
+
+    # Effectuer les délégations pour les services disponibles
+    for i, service in enumerate(available):
+        is_last = (i == len(available) - 1)
         process_delegation(driver, abonne, service, is_last=is_last)
 
     print(f"   SIREN {siren} termine.")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
+
+def select_sheets(data):
+    """Affiche un menu pour choisir les onglets à traiter."""
+    sheets = list(data.keys())
+    print("\n  Onglets disponibles :")
+    for idx, name in enumerate(sheets, 1):
+        nb = len(data[name]["sirens"])
+        progress = load_progress(name)
+        resume_idx = progress.get("siren_index", 0)
+        status = f" (reprise index {resume_idx})" if resume_idx > 0 else ""
+        print(f"    {idx}. {name} - {nb} SIRENs{status}")
+    print(f"    0. Tous les onglets")
+
+    choix = input("\n  Entrez les numeros des onglets (ex: 1,3,5 ou 0 pour tous) : ").strip()
+    if choix == "0":
+        return sheets
+
+    selected = []
+    for c in choix.split(","):
+        c = c.strip()
+        if c.isdigit() and 1 <= int(c) <= len(sheets):
+            selected.append(sheets[int(c) - 1])
+    if not selected:
+        print("  Aucun onglet valide selectionne.")
+        return []
+
+    print(f"  Onglets selectionnes : {', '.join(selected)}")
+    return selected
+
 
 def main():
     print("=" * 60)
@@ -398,18 +456,10 @@ def main():
         print("  Aucune donnee trouvee dans l'Excel.")
         return
 
-    # Charger la progression
-    progress = load_progress()
-    resume_sheet = progress.get("sheet")
-    resume_index = progress.get("siren_index", 0)
-
-    if resume_sheet:
-        print(f"\n  Reprise detectee : onglet '{resume_sheet}', SIREN index {resume_index}")
-        confirm = input("  Reprendre ? (o/n) : ").strip().lower()
-        if confirm != "o":
-            clear_progress()
-            resume_sheet = None
-            resume_index = 0
+    # Sélection des onglets
+    selected_sheets = select_sheets(data)
+    if not selected_sheets:
+        return
 
     # Initialiser le navigateur
     driver = init_driver()
@@ -418,20 +468,22 @@ def main():
         # Connexion manuelle
         login(driver)
 
-        # Boucle sur chaque onglet
-        skip_sheet = resume_sheet is not None
-        for sheet_name, sheet_data in data.items():
-            # Si on reprend, sauter les onglets déjà traités
-            if skip_sheet:
-                if sheet_name != resume_sheet:
-                    print(f"\n  Onglet '{sheet_name}' deja traite, passage au suivant.")
-                    continue
-                else:
-                    skip_sheet = False
-
+        # Boucle sur les onglets sélectionnés
+        for sheet_name in selected_sheets:
+            sheet_data = data[sheet_name]
             abonne = sheet_data["abonne"]
             sirens = sheet_data["sirens"]
-            start_index = resume_index if sheet_name == resume_sheet else 0
+
+            # Charger la progression pour cet onglet
+            progress = load_progress(sheet_name)
+            start_index = progress.get("siren_index", 0)
+
+            if start_index > 0:
+                print(f"\n  Reprise detectee pour '{sheet_name}' a l'index {start_index}")
+                confirm = input("  Reprendre ? (o/n) : ").strip().lower()
+                if confirm != "o":
+                    clear_progress(sheet_name)
+                    start_index = 0
 
             print(f"\n{'='*60}")
             print(f"  Onglet: {sheet_name} | Abonne: {abonne}")
@@ -465,14 +517,11 @@ def main():
                 print(f"   Progression: {i + 1}/{len(sirens)} "
                       f"({(i + 1) / len(sirens) * 100:.1f}%)")
 
-            # Onglet terminé, reset resume_index pour le prochain
-            resume_index = 0
+            clear_progress(sheet_name)
             print(f"\n  Onglet '{sheet_name}' termine !")
 
-        # Tout est terminé
-        clear_progress()
         print("\n" + "=" * 60)
-        print("  TOUTES LES DELEGATIONS ONT ETE TRAITEES !")
+        print("  TOUS LES ONGLETS SELECTIONNES ONT ETE TRAITES !")
         print("=" * 60)
 
     except KeyboardInterrupt:
