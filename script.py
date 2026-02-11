@@ -68,6 +68,20 @@ def clear_progress(sheet_name):
         os.remove(pf)
 
 
+def error_file_for(sheet_name):
+    """Retourne le chemin du fichier d'erreurs pour un onglet."""
+    safe_name = sheet_name.strip().replace(" ", "_")
+    return os.path.join(PROGRESS_DIR, f"erreurs_{safe_name}.txt")
+
+
+def log_siren_error(sheet_name, siren, index, reason):
+    """Ajoute un SIREN en erreur dans le fichier d'erreurs de l'onglet."""
+    ef = error_file_for(sheet_name)
+    with open(ef, "a") as f:
+        f.write(f"{siren} (index {index}) : {reason}\n")
+    print(f"   >> SIREN {siren} note dans {os.path.basename(ef)}")
+
+
 def extract_abonne_number(cell_value):
     """Extrait le numéro d'abonné depuis 'ABONNE 20260410001818'."""
     match = re.search(r"\d+", str(cell_value))
@@ -282,21 +296,23 @@ def find_service_link(driver, service_label):
 
 
 def select_acteur(driver):
-    """Sélectionne le radio button 'Acteur' (value='N2') si présent.
-    Le name peut être 'role', 'role0', 'role1', etc."""
+    """Sélectionne tous les radio buttons 'Acteur' (value='N2').
+    Le name peut être 'role', 'role0', 'role1', etc.
+    Il peut y avoir plusieurs activités, chacune avec son propre radio."""
     try:
-        # Chercher tout radio avec value='N2' dont le name commence par 'role'
         radios = driver.find_elements(By.CSS_SELECTOR, "input[type='radio'][value='N2']")
-        if radios:
-            for radio in radios:
-                name = radio.get_attribute("name") or ""
-                if name.startswith("role"):
-                    if not radio.is_selected():
-                        radio.click()
-                        time.sleep(ACTION_DELAY / 2)
-                    print(f"        Role 'Acteur' selectionne ({name}).")
-                    return
-        print("        Pas de radio 'Acteur' trouve, on continue.")
+        count = 0
+        for radio in radios:
+            name = radio.get_attribute("name") or ""
+            if name.startswith("role"):
+                if not radio.is_selected():
+                    radio.click()
+                    time.sleep(ACTION_DELAY / 2)
+                count += 1
+        if count > 0:
+            print(f"        Role 'Acteur' selectionne ({count} activite(s)).")
+        else:
+            print("        Pas de radio 'Acteur' trouve, on continue.")
     except Exception:
         print("        Pas de choix de role sur cette page, on continue.")
 
@@ -497,22 +513,21 @@ def main():
                 try:
                     process_siren(driver, siren, abonne)
                 except Exception as e:
-                    print(f"   Erreur sur SIREN {siren} (index {i}): {e}")
-                    save_progress(sheet_name, i)
-                    retry = input("   Reessayer ? (o/n/q pour quitter) : ").strip().lower()
-                    if retry == "q":
-                        print("  Arret demande. Progression sauvegardee.")
-                        return
-                    elif retry == "o":
+                    error_msg = str(e).split('\n')[0]  # première ligne seulement
+                    print(f"   Erreur sur SIREN {siren} (index {i}): {error_msg}")
+                    log_siren_error(sheet_name, siren, i, error_msg)
+                    print("   Skip automatique, passage au SIREN suivant.")
+                    # Tenter de revenir sur la page SIREN pour continuer
+                    try:
+                        navigate_to_siren_page(driver)
+                    except Exception:
+                        print("   Impossible de revenir a la page SIREN, re-navigation...")
                         try:
-                            process_siren(driver, siren, abonne)
-                        except Exception as e2:
-                            print(f"   Echec retry: {e2}")
-                            print("   Passage au SIREN suivant.")
-                            continue
-                    else:
-                        print("   Passage au SIREN suivant.")
-                        continue
+                            navigate_to_delegation_page(driver)
+                        except Exception:
+                            print("   ERREUR FATALE: impossible de reprendre la navigation.")
+                            print(f"   Progression sauvegardee a l'index {i}.")
+                            return
 
                 print(f"   Progression: {i + 1}/{len(sirens)} "
                       f"({(i + 1) / len(sirens) * 100:.1f}%)")
